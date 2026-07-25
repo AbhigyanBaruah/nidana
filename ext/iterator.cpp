@@ -117,9 +117,15 @@ struct ESILFunctionIterator::R2Session {
             0
         );
 
+        // NOTE: deliberately no "-A" here. "-q" means "quit once startup
+        // actions finish" -- combined with "-A" as a startup action,
+        // radare2 runs the analysis and exits immediately, before this
+        // process ever gets to send a single piped command. Full analysis
+        // is instead run as the first piped command ("aaa") below, which
+        // keeps the -q0 session alive afterward.
         std::string command_line =
             quote_windows_argument(executable) +
-            " -q0 -A " +
+            " -q0 " +
             quote_windows_argument(binary_path);
 
         STARTUPINFOA startup_info{};
@@ -177,7 +183,7 @@ struct ESILFunctionIterator::R2Session {
         }
     }
 
-    std::string command(const std::string& value) {
+    void write_command(const std::string& value) {
         // radare2 reads stdin line-by-line: it needs '\n' to know the
         // command is complete and ready to execute. Do NOT send '\0'
         // here -- that's the OUTPUT delimiter for -0 mode, not the input
@@ -205,7 +211,9 @@ struct ESILFunctionIterator::R2Session {
                 "failed to write command to persistent radare2 session"
             );
         }
+    }
 
+    std::string read_response() {
         std::string output;
         char character = 0;
         DWORD read = 0;
@@ -229,6 +237,11 @@ struct ESILFunctionIterator::R2Session {
             }
             output += character;
         }
+    }
+
+    std::string command(const std::string& value) {
+        write_command(value);
+        return read_response();
     }
 #else
     pid_t pid = -1;
@@ -282,10 +295,12 @@ struct ESILFunctionIterator::R2Session {
         posix_spawn_file_actions_addclose(&actions, stdout_pipe[1]);
         posix_spawn_file_actions_addclose(&actions, stderr_fd);
 
+        // NOTE: deliberately no "-A" here -- see the comment on the
+        // Windows command_line construction above for why "-A" and "-q0"
+        // don't work together for a persistent session.
         std::vector<char*> arguments;
         arguments.push_back(const_cast<char*>(executable.c_str()));
         arguments.push_back(const_cast<char*>("-q0"));
-        arguments.push_back(const_cast<char*>("-A"));
         arguments.push_back(const_cast<char*>(binary_path.c_str()));
         arguments.push_back(nullptr);
 
@@ -328,7 +343,7 @@ struct ESILFunctionIterator::R2Session {
         }
     }
 
-    std::string command(const std::string& value) {
+    void write_command(const std::string& value) {
         const char* data = value.data();
         std::size_t remaining = value.size();
         while (remaining > 0) {
@@ -361,7 +376,9 @@ struct ESILFunctionIterator::R2Session {
                 );
             }
         }
+    }
 
+    std::string read_response() {
         std::string output;
         char character = 0;
         while (true) {
@@ -383,6 +400,11 @@ struct ESILFunctionIterator::R2Session {
             }
             output += character;
         }
+    }
+
+    std::string command(const std::string& value) {
+        write_command(value);
+        return read_response();
     }
 #endif
 };
@@ -490,6 +512,17 @@ ESILFunctionIterator::ESILFunctionIterator(
       session_(std::make_unique<R2Session>(
           r2_executable_path_,
           binary_path_)) {
+    // radare2 emits one ready/startup NUL byte in -q0 mode before it has
+    // been sent any command at all. It must be drained here or every
+    // subsequent command()'s response will be read one message late.
+    session_->read_response();
+
+    // Full analysis is run as an explicit piped command rather than via
+    // the "-A" startup flag -- see the constructor comment above for why
+    // "-A" together with "-q" causes radare2 to exit before this session
+    // ever gets to send a command.
+    session_->command("aaa");
+
     const json functions = json::parse(session_->command("aflj"));
     if (!functions.is_array()) {
         throw std::runtime_error(
