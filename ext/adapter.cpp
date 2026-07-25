@@ -23,7 +23,10 @@ PYBIND11_MODULE(_core, module) {
         .def_readwrite("analysis_incomplete", &FunctionGraph::analysis_incomplete);
 
     py::class_<ESILFunctionIterator>(module, "ESILFunctionIterator")
-        .def(py::init<std::size_t>(), py::arg("count"))
+        .def(
+            py::init<std::string, std::string>(),
+            py::arg("binary_path"),
+            py::arg("r2_executable_path"))
         .def("__iter__", [](ESILFunctionIterator &self) -> ESILFunctionIterator & {
             return self;
         }, py::return_value_policy::reference_internal)

@@ -2,15 +2,19 @@
 
 #include "types.hpp"
 
-#include <cstddef>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 class ESILFunctionIterator {
 public:
-    explicit ESILFunctionIterator(std::size_t count);
+    ESILFunctionIterator(std::string binary_path, std::string r2_executable_path);
 
     FunctionGraph next();
 
 private:
-    std::size_t count_;
-    std::size_t index_ = 0;
+    std::string binary_path_;
+    std::string r2_executable_path_;
+    std::vector<uint64_t> function_addresses_;
+    std::unordered_map<uint64_t, std::string> function_names_;
 };
