@@ -178,7 +178,11 @@ struct ESILFunctionIterator::R2Session {
     }
 
     std::string command(const std::string& value) {
-        const char terminator = '\0';
+        // radare2 reads stdin line-by-line: it needs '\n' to know the
+        // command is complete and ready to execute. Do NOT send '\0'
+        // here -- that's the OUTPUT delimiter for -0 mode, not the input
+        // terminator, and radare2 will never run the command without it.
+        const char terminator = '\n';
         DWORD written = 0;
         if (
             !WriteFile(
@@ -345,7 +349,11 @@ struct ESILFunctionIterator::R2Session {
             remaining -= static_cast<std::size_t>(written);
         }
 
-        const char terminator = '\0';
+        // radare2 reads stdin line-by-line: it needs '\n' to know the
+        // command is complete and ready to execute. Do NOT send '\0'
+        // here -- that's the OUTPUT delimiter for -0 mode, not the input
+        // terminator, and radare2 will never run the command without it.
+        const char terminator = '\n';
         while (write(stdin_write, &terminator, 1) < 0) {
             if (errno != EINTR) {
                 throw std::runtime_error(
