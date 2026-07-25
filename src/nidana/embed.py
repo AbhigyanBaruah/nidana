@@ -14,12 +14,27 @@ _STRUCTURAL_DIMENSIONS = 16
 _TOKEN_PATTERN = re.compile(
     r"0x[0-9a-fA-F]+|[A-Za-z_][\w.]*|-?\d+|[^\s]+"
 )
+_HEX_LITERAL_PATTERN = re.compile(r"0x[0-9a-fA-F]+")
+_SMALL_CONSTANT_LIMIT = 0x10
 
 
 def _tokenize(operation: str) -> list[str]:
     """Tokenize one ESIL operation into stable lexical features."""
 
-    return _TOKEN_PATTERN.findall(operation.lower())
+    tokens = _TOKEN_PATTERN.findall(operation.lower())
+    normalized: list[str] = []
+
+    for token in tokens:
+        if _HEX_LITERAL_PATTERN.fullmatch(token):
+            # Relocations, pointers, and absolute immediates are unstable
+            # across firmware builds. Preserve only tiny hex constants,
+            # which commonly encode flags, widths, or sentinel values.
+            value = int(token, 16)
+            if value > _SMALL_CONSTANT_LIMIT:
+                token = "CONST_VAL"
+        normalized.append(token)
+
+    return normalized
 
 
 def _token_index(token: str) -> tuple[int, float]:

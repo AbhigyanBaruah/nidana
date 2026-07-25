@@ -2,7 +2,6 @@ from ._core import (
     BasicBlock,
     ESILFunctionIterator,
     FunctionGraph,
-    hello_nidana,
 )
 
 
@@ -16,6 +15,5 @@ __all__ = [
     "BasicBlock",
     "ESILFunctionIterator",
     "FunctionGraph",
-    "hello_nidana",
     "stream_functions",
 ]

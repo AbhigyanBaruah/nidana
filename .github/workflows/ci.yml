@@ -39,3 +39,32 @@ jobs:
 
       - name: Run pytest
         run: uv run pytest -q
+
+  arm-extraction:
+    name: ARM extraction integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install radare2 and ARM cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y radare2 gcc-arm-linux-gnueabi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+
+      - name: Install package and test dependencies
+        run: uv sync --extra dev
+
+      - name: Run non-x86 extraction test
+        run: uv run pytest -q tests/test_extraction_e2e.py

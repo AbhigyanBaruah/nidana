@@ -14,6 +14,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 pybind11_add_module(_core adapter.cpp iterator.cpp)
+target_compile_features(_core PRIVATE cxx_std_17)
 target_link_libraries(_core PRIVATE nlohmann_json::nlohmann_json)
 
 install(TARGETS _core DESTINATION nidana)

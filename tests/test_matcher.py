@@ -1,10 +1,21 @@
 import json
 import math
+from base64 import b64encode
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from nidana.embed import VECTOR_DIMENSION
+from nidana.indexer import canonical_payload
 from nidana.matcher import _cosine, match_vectors
+
+
+TEST_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+TEST_PUBLIC_KEY = TEST_PRIVATE_KEY.public_key().public_bytes(
+    serialization.Encoding.Raw,
+    serialization.PublicFormat.Raw,
+)
 
 
 def _vector(index: int, value: float = 1.0) -> list[float]:
@@ -27,6 +38,14 @@ def _write_index(path, *, vector=None, version=1, dimension=256) -> None:
             }
         ],
     }
+    payload["metadata"] = {
+        "schema_version": 1,
+        "vector_dimension": VECTOR_DIMENSION,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "signature": b64encode(
+            TEST_PRIVATE_KEY.sign(canonical_payload(payload))
+        ).decode("ascii"),
+    }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -44,11 +63,13 @@ def test_match_vectors_applies_threshold(tmp_path) -> None:
         [{"name": "hit", "addr": 1, "vector": _vector(0)}],
         index_path,
         threshold=0.9,
+        pubkey=TEST_PUBLIC_KEY,
     )
     misses = match_vectors(
         [{"name": "miss", "addr": 2, "vector": _vector(1)}],
         index_path,
         threshold=0.9,
+        pubkey=TEST_PUBLIC_KEY,
     )
 
     assert matches[0]["cve"] == "CVE-2025-0001"
@@ -70,7 +91,7 @@ def test_match_vectors_rejects_invalid_index_schema(
     _write_index(index_path, **kwargs)
 
     with pytest.raises(ValueError):
-        match_vectors([], index_path)
+        match_vectors([], index_path, pubkey=TEST_PUBLIC_KEY)
 
 
 def test_match_vectors_rejects_invalid_input_vector(tmp_path) -> None:
@@ -78,4 +99,8 @@ def test_match_vectors_rejects_invalid_input_vector(tmp_path) -> None:
     _write_index(index_path)
 
     with pytest.raises(ValueError):
-        match_vectors([{"vector": [math.nan]}], index_path)
+        match_vectors(
+            [{"vector": [math.nan]}],
+            index_path,
+            pubkey=TEST_PUBLIC_KEY,
+        )

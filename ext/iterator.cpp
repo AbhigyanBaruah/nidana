@@ -3,93 +3,393 @@
 #include <nlohmann/json.hpp>
 #include <pybind11/pybind11.h>
 
-#include <cctype>
-#include <cstdio>
+#include <cerrno>
+#include <cstring>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char** environ;
+#endif
+
 namespace py = pybind11;
 using json = nlohmann::json;
 
+struct ESILFunctionIterator::R2Session {
+#ifdef _WIN32
+    HANDLE process = nullptr;
+    HANDLE stdin_write = nullptr;
+    HANDLE stdout_read = nullptr;
+
+    static std::string quote_windows_argument(const std::string& value) {
+        std::string quoted = "\"";
+        std::size_t backslashes = 0;
+
+        for (char character : value) {
+            if (character == '\\') {
+                ++backslashes;
+                continue;
+            }
+
+            if (character == '"') {
+                quoted.append(backslashes * 2 + 1, '\\');
+                quoted += '"';
+            } else {
+                quoted.append(backslashes, '\\');
+                quoted += character;
+            }
+            backslashes = 0;
+        }
+
+        quoted.append(backslashes * 2, '\\');
+        quoted += '"';
+        return quoted;
+    }
+
+    R2Session(
+        const std::string& executable,
+        const std::string& binary_path) {
+        SECURITY_ATTRIBUTES security_attributes{};
+        security_attributes.nLength = sizeof(security_attributes);
+        security_attributes.bInheritHandle = TRUE;
+
+        HANDLE child_stdin_read = nullptr;
+        HANDLE child_stdout_write = nullptr;
+        HANDLE child_stderr = nullptr;
+        HANDLE stdin_write_local = nullptr;
+        HANDLE stdout_read_local = nullptr;
+
+        if (!CreatePipe(
+                &child_stdin_read,
+                &stdin_write_local,
+                &security_attributes,
+                0
+            )) {
+            throw std::runtime_error("failed to create radare2 pipes");
+        }
+        if (!CreatePipe(
+                &stdout_read_local,
+                &child_stdout_write,
+                &security_attributes,
+                0
+            )) {
+            CloseHandle(child_stdin_read);
+            CloseHandle(stdin_write_local);
+            throw std::runtime_error("failed to create radare2 pipes");
+        }
+
+        SetHandleInformation(
+            stdin_write_local,
+            HANDLE_FLAG_INHERIT,
+            0
+        );
+
+        child_stderr = CreateFileA(
+            "NUL",
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &security_attributes,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+        );
+        if (child_stderr == INVALID_HANDLE_VALUE) {
+            CloseHandle(child_stdin_read);
+            CloseHandle(child_stdout_write);
+            CloseHandle(stdin_write_local);
+            CloseHandle(stdout_read_local);
+            throw std::runtime_error("failed to open radare2 stderr sink");
+        }
+        SetHandleInformation(
+            stdout_read_local,
+            HANDLE_FLAG_INHERIT,
+            0
+        );
+
+        std::string command_line =
+            quote_windows_argument(executable) +
+            " -q0 -A " +
+            quote_windows_argument(binary_path);
+
+        STARTUPINFOA startup_info{};
+        startup_info.cb = sizeof(startup_info);
+        startup_info.dwFlags = STARTF_USESTDHANDLES;
+        startup_info.hStdInput = child_stdin_read;
+        startup_info.hStdOutput = child_stdout_write;
+        startup_info.hStdError = child_stderr;
+
+        PROCESS_INFORMATION process_info{};
+        if (
+            !CreateProcessA(
+                nullptr,
+                command_line.data(),
+                nullptr,
+                nullptr,
+                TRUE,
+                CREATE_NO_WINDOW,
+                nullptr,
+                nullptr,
+                &startup_info,
+                &process_info
+            )
+        ) {
+            CloseHandle(child_stdin_read);
+            CloseHandle(child_stdout_write);
+            CloseHandle(child_stderr);
+            CloseHandle(stdin_write_local);
+            CloseHandle(stdout_read_local);
+            throw std::runtime_error(
+                "failed to start persistent radare2 session"
+            );
+        }
+
+        CloseHandle(process_info.hThread);
+        CloseHandle(child_stdin_read);
+        CloseHandle(child_stdout_write);
+        CloseHandle(child_stderr);
+        process = process_info.hProcess;
+        stdin_write = stdin_write_local;
+        stdout_read = stdout_read_local;
+    }
+
+    ~R2Session() {
+        if (stdin_write != nullptr) {
+            CloseHandle(stdin_write);
+        }
+        if (stdout_read != nullptr) {
+            CloseHandle(stdout_read);
+        }
+        if (process != nullptr) {
+            TerminateProcess(process, 0);
+            WaitForSingleObject(process, 5000);
+            CloseHandle(process);
+        }
+    }
+
+    std::string command(const std::string& value) {
+        const char terminator = '\0';
+        DWORD written = 0;
+        if (
+            !WriteFile(
+                stdin_write,
+                value.data(),
+                static_cast<DWORD>(value.size()),
+                &written,
+                nullptr
+            ) ||
+            written != value.size() ||
+            !WriteFile(
+                stdin_write,
+                &terminator,
+                1,
+                &written,
+                nullptr
+            )
+        ) {
+            throw std::runtime_error(
+                "failed to write command to persistent radare2 session"
+            );
+        }
+
+        std::string output;
+        char character = 0;
+        DWORD read = 0;
+        while (true) {
+            if (
+                !ReadFile(
+                    stdout_read,
+                    &character,
+                    1,
+                    &read,
+                    nullptr
+                ) ||
+                read == 0
+            ) {
+                throw std::runtime_error(
+                    "persistent radare2 session closed unexpectedly"
+                );
+            }
+            if (character == '\0') {
+                return output;
+            }
+            output += character;
+        }
+    }
+#else
+    pid_t pid = -1;
+    int stdin_write = -1;
+    int stdout_read = -1;
+
+    R2Session(
+        const std::string& executable,
+        const std::string& binary_path) {
+        int stdin_pipe[2]{};
+        int stdout_pipe[2]{};
+
+        if (pipe(stdin_pipe) != 0) {
+            throw std::runtime_error("failed to create radare2 pipes");
+        }
+        if (pipe(stdout_pipe) != 0) {
+            close(stdin_pipe[0]);
+            close(stdin_pipe[1]);
+            throw std::runtime_error("failed to create radare2 pipes");
+        }
+
+        posix_spawn_file_actions_t actions;
+        const int stderr_fd = open("/dev/null", O_WRONLY);
+        if (stderr_fd < 0) {
+            close(stdin_pipe[0]);
+            close(stdin_pipe[1]);
+            close(stdout_pipe[0]);
+            close(stdout_pipe[1]);
+            throw std::runtime_error("failed to open radare2 stderr sink");
+        }
+
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(
+            &actions,
+            stdin_pipe[0],
+            STDIN_FILENO
+        );
+        posix_spawn_file_actions_adddup2(
+            &actions,
+            stdout_pipe[1],
+            STDOUT_FILENO
+        );
+        posix_spawn_file_actions_adddup2(
+            &actions,
+            stderr_fd,
+            STDERR_FILENO
+        );
+        posix_spawn_file_actions_addclose(&actions, stdin_pipe[0]);
+        posix_spawn_file_actions_addclose(&actions, stdin_pipe[1]);
+        posix_spawn_file_actions_addclose(&actions, stdout_pipe[0]);
+        posix_spawn_file_actions_addclose(&actions, stdout_pipe[1]);
+        posix_spawn_file_actions_addclose(&actions, stderr_fd);
+
+        std::vector<char*> arguments;
+        arguments.push_back(const_cast<char*>(executable.c_str()));
+        arguments.push_back(const_cast<char*>("-q0"));
+        arguments.push_back(const_cast<char*>("-A"));
+        arguments.push_back(const_cast<char*>(binary_path.c_str()));
+        arguments.push_back(nullptr);
+
+        const int result = posix_spawnp(
+            &pid,
+            executable.c_str(),
+            &actions,
+            nullptr,
+            arguments.data(),
+            environ
+        );
+        posix_spawn_file_actions_destroy(&actions);
+        close(stdin_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stderr_fd);
+
+        if (result != 0) {
+            close(stdin_pipe[1]);
+            close(stdout_pipe[0]);
+            throw std::runtime_error(
+                "failed to start persistent radare2 session: " +
+                std::string(std::strerror(result))
+            );
+        }
+
+        stdin_write = stdin_pipe[1];
+        stdout_read = stdout_pipe[0];
+    }
+
+    ~R2Session() {
+        if (stdin_write >= 0) {
+            close(stdin_write);
+        }
+        if (stdout_read >= 0) {
+            close(stdout_read);
+        }
+        if (pid > 0) {
+            kill(pid, SIGTERM);
+            waitpid(pid, nullptr, 0);
+        }
+    }
+
+    std::string command(const std::string& value) {
+        const char* data = value.data();
+        std::size_t remaining = value.size();
+        while (remaining > 0) {
+            const ssize_t written = write(
+                stdin_write,
+                data,
+                remaining
+            );
+            if (written < 0 && errno == EINTR) {
+                continue;
+            }
+            if (written <= 0) {
+                throw std::runtime_error(
+                    "failed to write command to persistent radare2 session"
+                );
+            }
+            data += written;
+            remaining -= static_cast<std::size_t>(written);
+        }
+
+        const char terminator = '\0';
+        while (write(stdin_write, &terminator, 1) < 0) {
+            if (errno != EINTR) {
+                throw std::runtime_error(
+                    "failed to terminate command for radare2 session"
+                );
+            }
+        }
+
+        std::string output;
+        char character = 0;
+        while (true) {
+            const ssize_t read_count = read(
+                stdout_read,
+                &character,
+                1
+            );
+            if (read_count < 0 && errno == EINTR) {
+                continue;
+            }
+            if (read_count <= 0) {
+                throw std::runtime_error(
+                    "persistent radare2 session closed unexpectedly"
+                );
+            }
+            if (character == '\0') {
+                return output;
+            }
+            output += character;
+        }
+    }
+#endif
+};
+
 namespace {
 
-// Safely quotes paths and parameters for shell execution
-std::string shell_quote(const std::string& value) {
-#ifdef _WIN32
-    std::string quoted = "\"";
-    for (char character : value) {
-        if (character == '"') {
-            quoted += "\\\"";
-        } else {
-            quoted += character;
-        }
-    }
-    quoted += "\"";
-    return quoted;
-#else
-    std::string quoted = "'";
-    for (char character : value) {
-        if (character == '\'') {
-            quoted += "'\\''";
-        } else {
-            quoted += character;
-        }
-    }
-    quoted += "'";
-    return quoted;
-#endif
-}
-
-// Constructs cross-platform shell commands compatible with popen/_popen
-std::string make_command(const std::string& raw_cmd) {
-#ifdef _WIN32
-    // Windows cmd.exe strips outermost quotes when multiple quoted arguments exist
-    // Append 2> NUL inside the outer quotes to discard radare2 warning logs
-    return "\"" + raw_cmd + " 2> NUL\"";
-#else
-    // Append 2> /dev/null for POSIX systems
-    return raw_cmd + " 2> /dev/null";
-#endif
-}
-
-// Executes a shell command and captures standard output
-std::string run_command(const std::string& command) {
-#ifdef _WIN32
-    FILE* pipe = _popen(command.c_str(), "r");
-#else
-    FILE* pipe = popen(command.c_str(), "r");
-#endif
-
-    if (pipe == nullptr) {
-        throw std::runtime_error("Failed to start radare2 subprocess");
-    }
-
-    std::string output;
-    char buffer[4096];
-    while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        output += buffer;
-    }
-
-#ifdef _WIN32
-    const int exit_code = _pclose(pipe);
-#else
-    const int exit_code = pclose(pipe);
-#endif
-
-    if (exit_code != 0) {
-        throw std::runtime_error(
-            "radare2 subprocess failed with exit code " + std::to_string(exit_code));
-    }
-
-    return output;
-}
-
-// Flexibly extracts an address from JSON field variations
 bool get_address(const json& object, uint64_t& address) {
-    for (const char* key : {"offset", "addr", "address", "jump", "target", "to"}) {
+    for (const char* key : {
+        "offset",
+        "addr",
+        "address",
+        "jump",
+        "target",
+        "to"
+    }) {
         if (!object.contains(key) || object[key].is_null()) {
             continue;
         }
@@ -105,10 +405,13 @@ bool get_address(const json& object, uint64_t& address) {
         }
         if (value.is_string()) {
             try {
-                address = std::stoull(value.get<std::string>(), nullptr, 0);
+                address = std::stoull(
+                    value.get<std::string>(),
+                    nullptr,
+                    0
+                );
                 return true;
             } catch (const std::exception&) {
-                // Ignore parse failures and continue searching
             }
         }
     }
@@ -125,9 +428,12 @@ void add_edge(const json& value, std::vector<uint64_t>& edges) {
         edges.push_back(value.get<uint64_t>());
     } else if (value.is_string()) {
         try {
-            edges.push_back(std::stoull(value.get<std::string>(), nullptr, 0));
+            edges.push_back(std::stoull(
+                value.get<std::string>(),
+                nullptr,
+                0
+            ));
         } catch (const std::exception&) {
-            // Ignore invalid string edge conversions
         }
     }
 }
@@ -157,7 +463,9 @@ void parse_esil(const json& block, std::vector<std::string>& esil_ops) {
     for (const auto& operation : block["ops"]) {
         if (operation.is_object() && operation.contains("esil") &&
             operation["esil"].is_string()) {
-            esil_ops.push_back(operation["esil"].get<std::string>());
+            esil_ops.push_back(
+                operation["esil"].get<std::string>()
+            );
         } else if (operation.is_string()) {
             esil_ops.push_back(operation.get<std::string>());
         }
@@ -170,14 +478,15 @@ ESILFunctionIterator::ESILFunctionIterator(
     std::string binary_path,
     std::string r2_executable_path)
     : binary_path_(std::move(binary_path)),
-      r2_executable_path_(std::move(r2_executable_path)) {
-
-    const std::string raw_cmd = shell_quote(r2_executable_path_) + " -Aqc aflj " + shell_quote(binary_path_);
-    const std::string cmd = make_command(raw_cmd);
-
-    const json functions = json::parse(run_command(cmd));
+      r2_executable_path_(std::move(r2_executable_path)),
+      session_(std::make_unique<R2Session>(
+          r2_executable_path_,
+          binary_path_)) {
+    const json functions = json::parse(session_->command("aflj"));
     if (!functions.is_array()) {
-        throw std::runtime_error("radare2 aflj output was not a JSON array");
+        throw std::runtime_error(
+            "radare2 aflj output was not a JSON array"
+        );
     }
 
     for (const auto& function : functions) {
@@ -192,6 +501,8 @@ ESILFunctionIterator::ESILFunctionIterator(
     }
 }
 
+ESILFunctionIterator::~ESILFunctionIterator() = default;
+
 FunctionGraph ESILFunctionIterator::next() {
     if (function_addresses_.empty()) {
         throw py::stop_iteration();
@@ -200,43 +511,31 @@ FunctionGraph ESILFunctionIterator::next() {
     const uint64_t function_addr = function_addresses_.back();
     function_addresses_.pop_back();
 
-    const std::string address_string = std::to_string(function_addr);
+    const std::string address = std::to_string(function_addr);
+    session_->command("af @ " + address);
+    const std::string output = session_->command("agj @ " + address);
 
-    // Analyze function ('af') before dumping graph ('agj') so r2 resolves local control flow
-    const std::string raw_cmd = shell_quote(r2_executable_path_) +
-                                " -qc \"af @ " + address_string +
-                                "; agj @ " + address_string + "\" " +
-                                shell_quote(binary_path_);
-    const std::string cmd = make_command(raw_cmd);
+    FunctionGraph graph_result;
+    graph_result.name = function_names_[function_addr];
+    graph_result.addr = function_addr;
 
-    const std::string output = run_command(cmd);
-
-    // Safety net: handle empty or whitespace-only radare2 output gracefully
-    if (output.empty() || output.find_first_not_of(" \t\r\n") == std::string::npos) {
-        FunctionGraph graph_result;
-        graph_result.name = function_names_[function_addr];
-        graph_result.addr = function_addr;
+    if (
+        output.empty() ||
+        output.find_first_not_of(" \t\r\n") == std::string::npos
+    ) {
         graph_result.analysis_incomplete = true;
         return graph_result;
     }
 
     const json graph_output = json::parse(output);
     const json* graph = &graph_output;
-
     if (graph_output.is_array()) {
         if (graph_output.empty()) {
-            FunctionGraph graph_result;
-            graph_result.name = function_names_[function_addr];
-            graph_result.addr = function_addr;
             graph_result.analysis_incomplete = true;
             return graph_result;
         }
         graph = &graph_output.front();
     }
-
-    FunctionGraph graph_result;
-    graph_result.name = function_names_[function_addr];
-    graph_result.addr = function_addr;
 
     if (graph->is_object()) {
         if (graph->contains("name") && (*graph)["name"].is_string()) {

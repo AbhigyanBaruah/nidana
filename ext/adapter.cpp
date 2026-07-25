@@ -7,8 +7,6 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(_core, module) {
-    module.def("hello_nidana", []() { return "Bridge Active"; });
-
     py::class_<BasicBlock>(module, "BasicBlock")
         .def(py::init<>())
         .def_readwrite("addr", &BasicBlock::addr)
@@ -22,7 +20,11 @@ PYBIND11_MODULE(_core, module) {
         .def_readwrite("blocks", &FunctionGraph::blocks)
         .def_readwrite("analysis_incomplete", &FunctionGraph::analysis_incomplete);
 
-    py::class_<ESILFunctionIterator>(module, "ESILFunctionIterator")
+    py::class_<ESILFunctionIterator>(
+        module,
+        "ESILFunctionIterator",
+        "Streaming iterator backed by one persistent radare2 session."
+    )
         .def(
             py::init<std::string, std::string>(),
             py::arg("binary_path"),

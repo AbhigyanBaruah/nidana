@@ -14,7 +14,12 @@ from rich.table import Table
 
 from .embed import vectorize_records
 from .indexer import build_index as build_vector_index
-from .matcher import match_vectors
+from .matcher import (
+    IntegrityError,
+    SchemaMismatchError,
+    match_vectors,
+)
+from .updater import DEFAULT_INDEX_URL, update_index
 
 
 app = typer.Typer(
@@ -32,6 +37,8 @@ class ExitCode(IntEnum):
     CLEAN = 0
     MATCHES_FOUND = 1
     TOOL_ERROR = 2
+    SCHEMA_MISMATCH = 3
+    INTEGRITY_FAILURE = 4
 
 
 class OutputFormat(str, Enum):
@@ -47,6 +54,22 @@ def _tool_error(message: str) -> None:
 
     error_console.print(f"[bold red]error:[/bold red] {message}")
     raise typer.Exit(code=ExitCode.TOOL_ERROR)
+
+
+def _schema_error(message: str) -> None:
+    """Print a schema error and terminate with the schema exit code."""
+
+    error_console.print(f"[bold red]schema error:[/bold red] {message}")
+    raise typer.Exit(code=ExitCode.SCHEMA_MISMATCH)
+
+
+def _integrity_error(message: str) -> None:
+    """Print an integrity error and terminate with the integrity code."""
+
+    error_console.print(
+        f"[bold red]integrity error:[/bold red] {message}"
+    )
+    raise typer.Exit(code=ExitCode.INTEGRITY_FAILURE)
 
 
 def _resolve_format(requested: Optional[OutputFormat]) -> OutputFormat:
@@ -130,6 +153,7 @@ def _match_records(
     records: Iterable[dict[str, Any]],
     db: Optional[Path],
     threshold: float = 0.85,
+    pubkey: Optional[Path] = None,
 ) -> list[dict[str, Any]]:
     """Match vector records against DB, or return no matches without a DB."""
 
@@ -137,7 +161,11 @@ def _match_records(
         return []
 
     try:
-        return match_vectors(records, db, threshold)
+        return match_vectors(records, db, threshold, pubkey)
+    except IntegrityError as exc:
+        _integrity_error(str(exc))
+    except SchemaMismatchError as exc:
+        _schema_error(str(exc))
     except (OSError, ValueError, TypeError) as exc:
         _tool_error(f"matching failed: {exc}")
 
@@ -235,6 +263,11 @@ def match(
         max=1.0,
         help="Minimum cosine similarity for a match.",
     ),
+    pubkey: Optional[Path] = typer.Option(
+        None,
+        "--pubkey",
+        help="Optional Ed25519 public key PEM; otherwise use the pinned key.",
+    ),
 ) -> None:
     """Match embedded JSON Lines from INPUT_FILE or standard input against DB."""
 
@@ -242,6 +275,7 @@ def match(
         _read_json_lines(input_file),
         db,
         threshold,
+        pubkey,
     )
     _render_matches(matches, _resolve_format(format))
     _exit_for_matches(matches)
@@ -264,12 +298,17 @@ def scan(
     r2_path: str = typer.Option(
         "radare2", "--r2-path", help="Path to radare2 executable."
     ),
+    pubkey: Optional[Path] = typer.Option(
+        None,
+        "--pubkey",
+        help="Optional Ed25519 public key PEM for index verification.",
+    ),
 ) -> None:
     """Run extraction, embedding, and matching for BINARY_PATH."""
 
     extracted = _extract_records(binary_path, r2_path)
     embedded = list(vectorize_records(extracted))
-    matches = _match_records(embedded, db)
+    matches = _match_records(embedded, db, pubkey=pubkey)
     _render_matches(matches, _resolve_format(format))
     _exit_for_matches(matches)
 
@@ -288,6 +327,11 @@ def build_index(
         "--r2-path",
         help="Path to radare2 executable.",
     ),
+    signing_key: Optional[Path] = typer.Option(
+        None,
+        "--signing-key",
+        help="Ed25519 private key PEM; omit to create an unsigned index.",
+    ),
 ) -> None:
     """Extract and embed SOURCE into a searchable CVE vector index."""
 
@@ -297,6 +341,7 @@ def build_index(
             cve,
             output,
             r2_path,
+            signing_key=signing_key,
         )
     except (OSError, ValueError, FileNotFoundError) as exc:
         _tool_error(f"index build failed: {exc}")
@@ -307,10 +352,37 @@ def build_index(
 
 
 @app.command()
-def update() -> None:
-    """Fetch and verify the latest signed vulnerability index."""
+def update(
+    url: str = typer.Option(
+        DEFAULT_INDEX_URL,
+        "--url",
+        help="Signed index URL; configurable for private deployments.",
+    ),
+    output: Path = typer.Option(
+        Path("nidana.index.json"),
+        "--output",
+        help="Local index path to replace after verification.",
+    ),
+    pubkey: Optional[Path] = typer.Option(
+        None,
+        "--pubkey",
+        help="Optional Ed25519 public key PEM; otherwise use the pinned key.",
+    ),
+) -> None:
+    """Download, verify, and atomically install the signed index."""
 
-    console.print("[green]index updated[/green]")
+    try:
+        entry_count = update_index(url, output, pubkey)
+    except IntegrityError as exc:
+        _integrity_error(str(exc))
+    except SchemaMismatchError as exc:
+        _schema_error(str(exc))
+    except (OSError, ValueError) as exc:
+        _tool_error(f"update failed: {exc}")
+
+    console.print(
+        f"[green]index updated[/green]: {entry_count} vectors -> {output}"
+    )
 
 
 @app.command()
