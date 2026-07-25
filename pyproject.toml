@@ -10,6 +10,13 @@ name = "nidana"
 version = "0.1.0"
 description = "Hybrid C++/Python CLI tool"
 requires-python = ">=3.9"
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+nidana = "nidana.cli:app"
 
 [tool.scikit-build]
 cmake.source-dir = "ext"

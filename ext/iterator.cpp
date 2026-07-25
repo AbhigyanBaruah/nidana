@@ -47,9 +47,11 @@ std::string shell_quote(const std::string& value) {
 std::string make_command(const std::string& raw_cmd) {
 #ifdef _WIN32
     // Windows cmd.exe strips outermost quotes when multiple quoted arguments exist
-    return "\"" + raw_cmd + "\"";
+    // Append 2> NUL inside the outer quotes to discard radare2 warning logs
+    return "\"" + raw_cmd + " 2> NUL\"";
 #else
-    return raw_cmd;
+    // Append 2> /dev/null for POSIX systems
+    return raw_cmd + " 2> /dev/null";
 #endif
 }
 
