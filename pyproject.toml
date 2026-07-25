@@ -1,0 +1,16 @@
+[build-system]
+requires = [
+    "scikit-build-core>=0.10",
+    "pybind11>=2.11",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nidana"
+version = "0.1.0"
+description = "Hybrid C++/Python CLI tool"
+requires-python = ">=3.9"
+
+[tool.scikit-build]
+cmake.source-dir = "ext"
+wheel.packages = ["src/nidana"]
