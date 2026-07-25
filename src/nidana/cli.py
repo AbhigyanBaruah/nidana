@@ -13,6 +13,8 @@ from rich.console import Console
 from rich.table import Table
 
 from .embed import vectorize_records
+from .indexer import build_index as build_vector_index
+from .matcher import match_vectors
 
 
 app = typer.Typer(
@@ -127,21 +129,17 @@ def _extract_records(
 def _match_records(
     records: Iterable[dict[str, Any]],
     db: Optional[Path],
+    threshold: float = 0.85,
 ) -> list[dict[str, Any]]:
-    """Return mock matches, with optional database validation."""
+    """Match vector records against DB, or return no matches without a DB."""
 
-    if db is not None and not db.is_file():
-        _tool_error(f"database not found: {db}")
+    if db is None:
+        return []
 
-    return [
-        {
-            "record": record,
-            "cve": record["cve"],
-            "severity": record.get("severity", "unknown"),
-        }
-        for record in records
-        if record.get("cve")
-    ]
+    try:
+        return match_vectors(records, db, threshold)
+    except (OSError, ValueError, TypeError) as exc:
+        _tool_error(f"matching failed: {exc}")
 
 
 def _sarif(matches: list[dict[str, Any]]) -> dict[str, Any]:
@@ -219,10 +217,21 @@ def match(
         case_sensitive=False,
         help="Output format: table, json, or sarif.",
     ),
+    threshold: float = typer.Option(
+        0.85,
+        "--threshold",
+        min=0.0,
+        max=1.0,
+        help="Minimum cosine similarity for a match.",
+    ),
 ) -> None:
     """Match embedded JSON Lines from INPUT_FILE or standard input against DB."""
 
-    matches = _match_records(_read_json_lines(input_file), db)
+    matches = _match_records(
+        _read_json_lines(input_file),
+        db,
+        threshold,
+    )
     _render_matches(matches, _resolve_format(format))
     _exit_for_matches(matches)
 
@@ -230,18 +239,26 @@ def match(
 @app.command()
 def scan(
     binary_path: Path,
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional vector index used for matching.",
+    ),
     format: Optional[OutputFormat] = typer.Option(
         None,
         "--format",
         case_sensitive=False,
         help="Output format: table, json, or sarif.",
     ),
+    r2_path: str = typer.Option(
+        "radare2", "--r2-path", help="Path to radare2 executable."
+    ),
 ) -> None:
     """Run extraction, embedding, and matching for BINARY_PATH."""
 
-    extracted = _extract_records(binary_path)
+    extracted = _extract_records(binary_path, r2_path)
     embedded = list(vectorize_records(extracted))
-    matches = _match_records(embedded, None)
+    matches = _match_records(embedded, db)
     _render_matches(matches, _resolve_format(format))
     _exit_for_matches(matches)
 
@@ -250,12 +267,32 @@ def scan(
 def build_index(
     source: Path = typer.Option(..., "--source"),
     cve: str = typer.Option(..., "--cve"),
+    output: Path = typer.Option(
+        Path("nidana.index.json"),
+        "--output",
+        help="Destination for the local vector index.",
+    ),
+    r2_path: str = typer.Option(
+        "radare2",
+        "--r2-path",
+        help="Path to radare2 executable.",
+    ),
 ) -> None:
-    """Build a mock CVE database from SOURCE for CVE."""
+    """Extract and embed SOURCE into a searchable CVE vector index."""
 
-    if not source.exists():
-        _tool_error(f"source not found: {source}")
-    console.print(f"[green]index built[/green] for {cve} from {source}")
+    try:
+        entry_count = build_vector_index(
+            source,
+            cve,
+            output,
+            r2_path,
+        )
+    except (OSError, ValueError, FileNotFoundError) as exc:
+        _tool_error(f"index build failed: {exc}")
+
+    console.print(
+        f"[green]index built[/green]: {entry_count} vectors -> {output}"
+    )
 
 
 @app.command()
