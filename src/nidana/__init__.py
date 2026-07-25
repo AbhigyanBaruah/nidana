@@ -1,3 +1,13 @@
-from ._core import hello_nidana
+from ._core import ESILFunctionIterator, FunctionGraph, BasicBlock, hello_nidana
 
-__all__ = ["hello_nidana"]
+
+def stream_functions(count):
+    return ESILFunctionIterator(count)
+
+__all__ = [
+    "BasicBlock",
+    "ESILFunctionIterator",
+    "FunctionGraph",
+    "hello_nidana",
+    "stream_functions",
+]
