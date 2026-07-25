@@ -180,11 +180,22 @@ def _render_matches(matches: list[dict[str, Any]], output_format: OutputFormat) 
         return
 
     table = Table(title="NIDANA Matches")
-    table.add_column("CVE")
-    table.add_column("Severity")
+    table.add_column("Function", style="cyan")
+    table.add_column("Address", style="dim")
+    table.add_column("CVE", style="bold red")
+    table.add_column("Similarity", style="green")
+    table.add_column("Severity", style="magenta")
+
     for match in matches:
-        table.add_row(str(match["cve"]), str(match["severity"]))
-    console.print(table)
+        func = match.get("function", {})
+        table.add_row(
+            str(func.get("name", "unknown")),
+            f"0x{(func.get('addr') or 0):x}",
+            str(match["cve"]),
+            f"{match.get('similarity', 0.0):.2%}",
+            str(match["severity"]),
+        )
+    Console(file=sys.stdout, width=80).print(table)
 
 
 def _exit_for_matches(matches: list[dict[str, Any]]) -> None:
