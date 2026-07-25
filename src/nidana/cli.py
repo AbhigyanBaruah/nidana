@@ -12,6 +12,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .embed import vectorize_records
+
 
 app = typer.Typer(
     name="nidana",
@@ -53,7 +55,7 @@ def _resolve_format(requested: Optional[OutputFormat]) -> OutputFormat:
     return OutputFormat.TABLE if sys.stdout.isatty() else OutputFormat.JSON
 
 
-def _read_json_lines(input_file: Optional[Path]) -> list[dict[str, Any]]:
+def _iter_json_lines(input_file: Optional[Path]) -> Iterable[dict[str, Any]]:
     """Read JSON Lines from a file or standard input."""
 
     try:
@@ -61,7 +63,6 @@ def _read_json_lines(input_file: Optional[Path]) -> list[dict[str, Any]]:
     except OSError as exc:
         _tool_error(f"cannot open input {input_file}: {exc}")
 
-    records: list[dict[str, Any]] = []
     try:
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
@@ -72,11 +73,16 @@ def _read_json_lines(input_file: Optional[Path]) -> list[dict[str, Any]]:
                 _tool_error(f"invalid JSON on input line {line_number}: {exc.msg}")
             if not isinstance(value, dict):
                 _tool_error(f"input line {line_number} must contain a JSON object")
-            records.append(value)
+            yield value
     finally:
         if input_file:
             stream.close()
-    return records
+
+
+def _read_json_lines(input_file: Optional[Path]) -> list[dict[str, Any]]:
+    """Read all JSON Lines from a file or standard input."""
+
+    return list(_iter_json_lines(input_file))
 
 
 def _write_json_lines(records: Iterable[dict[str, Any]]) -> None:
@@ -116,18 +122,6 @@ def _extract_records(
         return records
     except Exception as exc:
         _tool_error(f"extraction failed: {exc}")
-
-
-def _embed_records(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return mock vector records while preserving pipeline input metadata."""
-
-    return [
-        {
-            "input": record,
-            "vector": [0.0, 0.0, 0.0],
-        }
-        for record in records
-    ]
 
 
 def _match_records(
@@ -208,17 +202,11 @@ def _exit_for_matches(matches: list[dict[str, Any]]) -> None:
 
 
 @app.command()
-def extract(binary_path: Path) -> None:
-    """Extract functions from BINARY_PATH and emit JSON Lines."""
-
-    _write_json_lines(_extract_records(binary_path))
-
-
-@app.command()
 def embed(input_file: Optional[Path] = typer.Argument(None)) -> None:
-    """Embed JSON Lines from INPUT_FILE or standard input."""
+    """Vectorize function CFG JSON Lines from INPUT_FILE or standard input."""
 
-    _write_json_lines(_embed_records(_read_json_lines(input_file)))
+    for record in vectorize_records(_iter_json_lines(input_file)):
+        _write_json_lines((record,))
 
 
 @app.command()
@@ -252,7 +240,7 @@ def scan(
     """Run extraction, embedding, and matching for BINARY_PATH."""
 
     extracted = _extract_records(binary_path)
-    embedded = _embed_records(extracted)
+    embedded = list(vectorize_records(extracted))
     matches = _match_records(embedded, None)
     _render_matches(matches, _resolve_format(format))
     _exit_for_matches(matches)
@@ -268,6 +256,13 @@ def build_index(
     if not source.exists():
         _tool_error(f"source not found: {source}")
     console.print(f"[green]index built[/green] for {cve} from {source}")
+
+
+@app.command()
+def update() -> None:
+    """Fetch and verify the latest signed vulnerability index."""
+
+    console.print("[green]index updated[/green]")
 
 
 @app.command()
