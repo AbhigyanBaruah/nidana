@@ -1,0 +1,25 @@
+schemaVersion: 1
+
+title: "NIDANA"
+
+category: "Cybersecurity"
+
+description: >
+  Architecture-neutral vulnerability scanner using ESIL and vector
+  embeddings to identify known-vulnerable functions across firmware binaries.
+
+tags:
+  - Python
+  - radare2
+  - ESIL
+  - CFG
+  - Vector Embeddings
+
+image: null
+
+featured: true
+status: "active"
+
+publishedAt: "2026-07-28"
+
+demo: null
